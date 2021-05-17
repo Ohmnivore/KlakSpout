@@ -16,15 +16,12 @@ namespace klakspout
         // Object attributes
         const std::string name_;
         int width_, height_;
-
-        // D3D11 objects
-        ID3D11Resource* d3d11_resource_;
-        ID3D11ShaderResourceView* d3d11_resource_view_;
+        bool active;
+        ID3D11Resource* wrappedDX12Texture;
 
         // Constructor
-        SharedObject(Type type, const string& name, int width = -1, int height = -1)
-            : type_(type), name_(name), width_(width), height_(height),
-              d3d11_resource_(nullptr), d3d11_resource_view_(nullptr)
+        SharedObject(Type type, const std::string& name, int width = -1, int height = -1)
+            : type_(type), name_(name), width_(width), height_(height), active(false), wrappedDX12Texture(nullptr)
         {
             if (type_ == Type::sender)
                 DEBUG_LOG("Sender created (%s)", name_.c_str());
@@ -51,7 +48,7 @@ namespace klakspout
         // Check if it's active.
         bool isActive() const
         {
-            return d3d11_resource_;
+            return active;
         }
 
         // Validate the internal resources.
@@ -70,21 +67,54 @@ namespace klakspout
             unsigned int width, height;
             HANDLE handle;
             DWORD format;
-            auto found = g.sender_names_->CheckSender(name_.c_str(), width, height, handle, format);
+            bool found = false;
+
+            if (g.renderer_ == Globals::Renderer::DX11)
+                found = g.spoutDX_->sendernames.CheckSender(name_.c_str(), width, height, handle, format);
+            else if (g.renderer_ == Globals::Renderer::DX12)
+                found = g.spoutDX12_->sendernames.CheckSender(name_.c_str(), width, height, handle, format);
+
             return found && width_ == width && height_ == height;
         }
 
         // Try activating the object. Returns false when failed.
         bool activate()
         {
-            assert(d3d11_resource_ == nullptr && d3d11_resource_view_ == nullptr);
-            return type_ == Type::sender ? setupSender() : setupReceiver();
+            assert(active == false);
+            active = (type_ == Type::sender) ? setupSender() : setupReceiver();
+            return active;
         }
 
         // Deactivate the object and release its internal resources.
         void deactivate()
         {
             releaseInternals();
+        }
+
+        bool SendTexture(void* texture)
+        {
+            if (!active)
+            {
+                return false;
+            }
+
+            auto& g = Globals::get();
+
+            // if (g.renderer_ == Globals::Renderer::DX11)
+            // {
+            //     ID3D11Texture2D* dx11Texture = static_cast<ID3D11Texture2D*>(texture);
+            //     return g.spoutDX_->SendTexture(dx11Texture);
+            // }
+            // else if (g.renderer_ == Globals::Renderer::DX12)
+            // {
+            //     ID3D12Resource* dx12Resource = static_cast<ID3D12Resource*>(texture);
+            //     if (!wrappedDX12Texture)
+            //         g.spoutDX12_->WrapDX12Resource(dx12Resource, &wrappedDX12Texture);
+            //     if (wrappedDX12Texture)
+            //         return g.spoutDX12_->SendDX11Resource(wrappedDX12Texture);
+            // }
+
+            return false;
         }
 
     private:
@@ -95,20 +125,20 @@ namespace klakspout
             auto& g = Globals::get();
 
             // Senders should unregister their own name on destruction.
-            if (type_ == Type::sender && d3d11_resource_)
-                g.sender_names_->ReleaseSenderName(name_.c_str());
-
-            // Release D3D11 objects.
-            if (d3d11_resource_)
+            if (type_ == Type::sender && active)
             {
-                d3d11_resource_->Release();
-                d3d11_resource_ = nullptr;
+                DEBUG_LOG("Sender being disposed (%s)", name_.c_str());
+
+                if (g.renderer_ == Globals::Renderer::DX11)
+                    g.spoutDX_->ReleaseSender();
+                else if (g.renderer_ == Globals::Renderer::DX12)
+                    g.spoutDX12_->ReleaseSender();
             }
 
-            if (d3d11_resource_view_)
+            if (wrappedDX12Texture)
             {
-                d3d11_resource_view_->Release();
-                d3d11_resource_view_ = nullptr;
+                wrappedDX12Texture->Release();
+                wrappedDX12Texture = nullptr;
             }
         }
 
@@ -120,48 +150,25 @@ namespace klakspout
             // Avoid name duplication.
             {
                 unsigned int width, height; HANDLE handle; DWORD format; // unused
-                if (g.sender_names_->CheckSender(name_.c_str(), width, height, handle, format)) return false;
+                bool found = false;
+
+                if (g.renderer_ == Globals::Renderer::DX11)
+                    found = g.spoutDX_->sendernames.CheckSender(name_.c_str(), width, height, handle, format);
+                else if (g.renderer_ == Globals::Renderer::DX12)
+                    found = g.spoutDX12_->sendernames.CheckSender(name_.c_str(), width, height, handle, format);
+
+                if (found)
+                    return false;
             }
 
             // Currently we only support RGBA32.
-            const auto format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            //const auto format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            //g.spoutDX_->SetSenderFormat(format);
 
-            // Create a shared texture.
-            ID3D11Texture2D* texture;
-            HANDLE handle;
-            auto res_spout = g.spout_->CreateSharedDX11Texture(g.d3d11_, width_, height_, format, &texture, handle);
-
-            if (!res_spout)
-            {
-                DEBUG_LOG("CreateSharedDX11Texture failed (%s)", name_.c_str());
-                return false;
-            }
-
-            d3d11_resource_ = texture;
-
-            // Create a resource view for the shared texture.
-            auto res_d3d = g.d3d11_->CreateShaderResourceView(d3d11_resource_, nullptr, &d3d11_resource_view_);
-
-            if (FAILED(res_d3d))
-            {
-                d3d11_resource_->Release();
-                d3d11_resource_ = nullptr;
-                DEBUG_LOG("CreateShaderResourceView failed (%s:%x)", name_.c_str(), res_d3d);
-                return false;
-            }
-
-            // Create a Spout sender object for the shared texture.
-            res_spout = g.sender_names_->CreateSender(name_.c_str(), width_, height_, handle, format);
-
-            if (!res_spout)
-            {
-                d3d11_resource_view_->Release();
-                d3d11_resource_view_ = nullptr;
-                d3d11_resource_->Release();
-                d3d11_resource_ = nullptr;
-                DEBUG_LOG("CreateSender failed (%s)", name_.c_str());
-                return false;
-            }
+            if (g.renderer_ == Globals::Renderer::DX11)
+                g.spoutDX_->SetSenderName(name_.c_str());
+            else if (g.renderer_ == Globals::Renderer::DX12)
+                g.spoutDX12_->SetSenderName(name_.c_str());
 
             DEBUG_LOG("Sender activated (%s)", name_.c_str());
             return true;
@@ -170,46 +177,46 @@ namespace klakspout
         // Set up as a receiver.
         bool setupReceiver()
         {
-            auto& g = Globals::get();
+            // auto& g = Globals::get();
 
-            // Retrieve the sender information with the given name.
-            HANDLE handle;
-            DWORD format;
-            unsigned int w, h;
-            auto res_spout = g.sender_names_->CheckSender(name_.c_str(), w, h, handle, format);
+            // // Retrieve the sender information with the given name.
+            // HANDLE handle;
+            // DWORD format;
+            // unsigned int w, h;
+            // auto res_spout = g.sender_names_->CheckSender(name_.c_str(), w, h, handle, format);
 
-            if (!res_spout)
-            {
-                // This happens really frequently. Avoid spamming the console.
-                // DEBUG_LOG("CheckSender failed (%s)", name_.c_str());
-                return false;
-            }
+            // if (!res_spout)
+            // {
+            //     // This happens really frequently. Avoid spamming the console.
+            //     // DEBUG_LOG("CheckSender failed (%s)", name_.c_str());
+            //     return false;
+            // }
 
-            width_ = w;
-            height_ = h;
+            // width_ = w;
+            // height_ = h;
 
-            // Start sharing the texture.
-            void** ptr = reinterpret_cast<void**>(&d3d11_resource_);
-            auto res_d3d = g.d3d11_->OpenSharedResource(handle, __uuidof(ID3D11Resource), ptr);
+            // // Start sharing the texture.
+            // void** ptr = reinterpret_cast<void**>(&d3d11_resource_);
+            // auto res_d3d = g.d3d11_->OpenSharedResource(handle, __uuidof(ID3D11Resource), ptr);
 
-            if (FAILED(res_d3d))
-            {
-                DEBUG_LOG("OpenSharedResource failed (%s:%x)", name_.c_str(), res_d3d);
-                return false;
-            }
+            // if (FAILED(res_d3d))
+            // {
+            //     DEBUG_LOG("OpenSharedResource failed (%s:%x)", name_.c_str(), res_d3d);
+            //     return false;
+            // }
 
-            // Create a resource view for the shared texture.
-            res_d3d = g.d3d11_->CreateShaderResourceView(d3d11_resource_, nullptr, &d3d11_resource_view_);
+            // // Create a resource view for the shared texture.
+            // res_d3d = g.d3d11_->CreateShaderResourceView(d3d11_resource_, nullptr, &d3d11_resource_view_);
 
-            if (FAILED(res_d3d))
-            {
-                d3d11_resource_->Release();
-                d3d11_resource_ = nullptr;
-                DEBUG_LOG("CreateShaderResourceView failed (%s:%x)", name_.c_str(), res_d3d);
-                return false;
-            }
+            // if (FAILED(res_d3d))
+            // {
+            //     d3d11_resource_->Release();
+            //     d3d11_resource_ = nullptr;
+            //     DEBUG_LOG("CreateShaderResourceView failed (%s:%x)", name_.c_str(), res_d3d);
+            //     return false;
+            // }
 
-            DEBUG_LOG("Receiver activated (%s)", name_.c_str());
+            // DEBUG_LOG("Receiver activated (%s)", name_.c_str());
             return true;
         }
     };

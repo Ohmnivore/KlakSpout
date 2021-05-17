@@ -4,8 +4,8 @@
 #include <cassert>
 #include <memory>
 #include <d3d11.h>
-#include "Spout/SpoutDirectX.h"
-#include "Spout/SpoutSenderNames.h"
+#include "../Spout/SpoutDirectX/SpoutDX/SpoutDX.h"
+#include "../Spout/SpoutDirectX/SpoutDX/SpoutDX12/SpoutDX12.h"
 
 // Debug logging macro
 #if defined(_DEBUG)
@@ -21,19 +21,17 @@ namespace klakspout
     {
     public:
 
-        ID3D11Device* d3d11_;
-        std::unique_ptr<spoutDirectX> spout_;
-        std::unique_ptr<spoutSenderNames> sender_names_;
+        enum class Renderer { DX11, DX12 } renderer_;
+
+        std::unique_ptr<spoutDX> spoutDX_;
+        std::unique_ptr<spoutDX12> spoutDX12_;
+        bool isReady = false;
+        bool isReady2 = false;
 
         static Globals& get()
         {
             static Globals instance;
             return instance;
-        }
-
-        bool isReady() const
-        {
-            return d3d11_;
         }
     };
 }

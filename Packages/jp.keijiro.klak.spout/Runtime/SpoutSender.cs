@@ -49,16 +49,12 @@ namespace Klak.Spout
             // Shared texture lazy initialization
             if (_sharedTexture == null)
             {
-                var ptr = PluginEntry.GetTexturePointer(_plugin);
-                if (ptr != System.IntPtr.Zero)
-                {
-                    _sharedTexture = Texture2D.CreateExternalTexture(
-                        PluginEntry.GetTextureWidth(_plugin),
-                        PluginEntry.GetTextureHeight(_plugin),
-                        TextureFormat.ARGB32, false, false, ptr
-                    );
-                    _sharedTexture.hideFlags = HideFlags.DontSave;
-                }
+                _sharedTexture = new Texture2D(
+                    PluginEntry.GetTextureWidth(_plugin),
+                    PluginEntry.GetTextureHeight(_plugin),
+                    TextureFormat.ARGB32, false, false
+                );
+                _sharedTexture.hideFlags = HideFlags.DontSave;
             }
 
             // Shared texture update
@@ -83,6 +79,11 @@ namespace Klak.Spout
                 Graphics.Blit(source, tempRT, _blitMaterial, 0);
                 Graphics.CopyTexture(tempRT, _sharedTexture);
                 RenderTexture.ReleaseTemporary(tempRT);
+
+                if (_plugin != System.IntPtr.Zero)
+                {
+                    PluginEntry.SendTexture(_plugin, _sharedTexture.GetNativeTexturePtr());
+                }
             }
         }
 

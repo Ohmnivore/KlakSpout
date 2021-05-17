@@ -1,7 +1,10 @@
 #include "KlakSpoutSharedObject.h"
-#include "Unity/IUnityGraphics.h"
-#include "Unity/IUnityGraphicsD3D11.h"
+#include "../Unity/IUnityGraphics.h"
+#include "../Unity/IUnityGraphicsD3D11.h"
 #include <mutex>
+
+#include <d3d12.h>
+#include "../Unity/IUnityGraphicsD3D12.h"
 
 namespace
 {
@@ -23,8 +26,9 @@ namespace
     {
         assert(unity_);
 
-        // Do nothing if it's not the D3D11 renderer.
-        if (unity_->Get<IUnityGraphics>()->GetRenderer() != kUnityGfxRendererD3D11) return;
+        // Do nothing if it's not the D3D11/D3D12 renderer.
+        UnityGfxRenderer renderer = unity_->Get<IUnityGraphics>()->GetRenderer();
+        if (renderer != kUnityGfxRendererD3D11 && renderer != kUnityGfxRendererD3D12) return;
 
         DEBUG_LOG("OnGraphicsDeviceEvent (%d)", event_type);
 
@@ -32,38 +36,89 @@ namespace
 
         if (event_type == kUnityGfxDeviceEventInitialize)
         {
-            // Retrieve the D3D11 interface.
-            g.d3d11_ = unity_->Get<IUnityGraphicsD3D11>()->GetDevice();
+            if (renderer == kUnityGfxRendererD3D11)
+            {
+                // Retrieve the D3D11 interface.
+                ID3D11Device* device = unity_->Get<IUnityGraphicsD3D11>()->GetDevice();
+                if (!device)
+                {
+                    DEBUG_LOG("Couldn't retrieve D3D11 interface");
+                    return;
+                }
 
-            // Initialize the Spout global objects.
-            g.spout_ = std::make_unique<spoutDirectX>();
-            g.sender_names_ = std::make_unique<spoutSenderNames>();
+                // Enable logging to catch Spout warnings and errors
+                OpenSpoutConsole(); // Console only for debugging
+                EnableSpoutLog(); // Log to console
+                SetSpoutLogLevel(SPOUT_LOG_VERBOSE); // show only warnings and errors
 
-            // Apply the max sender registry value.
-            DWORD max_senders;
-            if (g.spout_->ReadDwordFromRegistry(&max_senders, "Software\\Leading Edge\\Spout", "MaxSenders"))
-                g.sender_names_->SetMaxSenders(max_senders);
+                g.spoutDX_ = std::make_unique<spoutDX>();
+                if (!g.spoutDX_->OpenDirectX11(device))
+                {
+                    DEBUG_LOG("OpenDirectX11 failed");
+                    return;
+                }
+
+                g.renderer_ = klakspout::Globals::Renderer::DX11;
+                g.isReady = true;
+            }
+            else if (renderer == kUnityGfxRendererD3D12)
+            {
+                // Enable logging to catch Spout warnings and errors
+                OpenSpoutConsole(); // Console only for debugging
+                EnableSpoutLog(); // Log to console
+                SetSpoutLogLevel(SPOUT_LOG_VERBOSE); // show only warnings and errors
+
+                g.spoutDX12_ = std::make_unique<spoutDX12>();
+                g.renderer_ = klakspout::Globals::Renderer::DX12;
+                g.isReady = true;
+            }
         }
         else if (event_type == kUnityGfxDeviceEventShutdown)
         {
-            // Invalidate the D3D11 interface.
-            g.d3d11_ = nullptr;
-
-            // Finalize the Spout globals.
-            g.spout_.reset();
-            g.sender_names_.reset();
+            if (renderer == kUnityGfxRendererD3D11)
+            {
+                g.spoutDX_.reset();
+            }
+            else
+            {
+                g.spoutDX12_->CloseDirectX12();
+                g.spoutDX12_.reset();
+            }
         }
     }
 
     // Unity render event callbacks
     void UNITY_INTERFACE_API OnRenderEvent(int event_id, void* data)
     {
+        std::lock_guard<std::mutex> guard(lock_);
+
+        auto& g = klakspout::Globals::get();
+
+        if (event_id == 0 && g.renderer_ == klakspout::Globals::Renderer::DX12 && !g.isReady2)
+        {
+            // Retrieve the D3D12 interface.
+            IUnityGraphicsD3D12v4* uInterface = unity_->Get<IUnityGraphicsD3D12v4>();
+            ID3D12Device* device = uInterface->GetDevice();
+            ID3D12CommandQueue* commandQueue = uInterface->GetCommandQueue();
+            if (!device || !commandQueue)
+            {
+                DEBUG_LOG("Couldn't retrieve D3D12 interface");
+                return;
+            }
+
+            if (!g.spoutDX12_->OpenDirectX12(device, reinterpret_cast<IUnknown**>(commandQueue)))
+            {
+                DEBUG_LOG("OpenDirectX12 failed");
+                return;
+            }
+
+            g.isReady2 = true;
+        }
+
         // Do nothing if the D3D11 interface is not available. This only
         // happens on Editor. It may leak some resoruces but we can't do
         // anything about them.
-        if (!klakspout::Globals::get().isReady()) return;
-
-        std::lock_guard<std::mutex> guard(lock_);
+        if (!g.isReady) return;
 
         auto* pobj = reinterpret_cast<klakspout::SharedObject*>(data);
 
@@ -117,19 +172,26 @@ extern "C" UnityRenderingEventAndData UNITY_INTERFACE_EXPORT GetRenderEventFunc(
 
 extern "C" void UNITY_INTERFACE_EXPORT * CreateSender(const char* name, int width, int height)
 {
-    if (!klakspout::Globals::get().isReady()) return nullptr;
+    if (!klakspout::Globals::get().isReady) return nullptr;
     return new klakspout::SharedObject(klakspout::SharedObject::Type::sender, name != nullptr ? name : "", width, height);
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT * CreateReceiver(const char* name)
 {
-    if (!klakspout::Globals::get().isReady()) return nullptr;
+    if (!klakspout::Globals::get().isReady) return nullptr;
     return new klakspout::SharedObject(klakspout::SharedObject::Type::receiver, name != nullptr ? name : "");
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT * GetTexturePointer(void* ptr)
 {
-    return reinterpret_cast<const klakspout::SharedObject*>(ptr)->d3d11_resource_view_;
+    // return reinterpret_cast<const klakspout::SharedObject*>(ptr)->d3d11_resource_view_;
+    return nullptr;
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT SendTexture(void* ptr, void* tex)
+{
+    if (!klakspout::Globals::get().isReady) return false;
+    return reinterpret_cast<klakspout::SharedObject*>(ptr)->SendTexture(tex);
 }
 
 extern "C" int UNITY_INTERFACE_EXPORT GetTextureWidth(void* ptr)
@@ -151,15 +213,38 @@ extern "C" int UNITY_INTERFACE_EXPORT CheckValid(void* ptr)
 extern "C" int UNITY_INTERFACE_EXPORT ScanSharedObjects()
 {
     auto& g = klakspout::Globals::get();
-    if (!g.isReady()) return 0;
+    if (!g.isReady) return 0;
     std::lock_guard<std::mutex> guard(lock_);
     shared_object_names_.clear();
-    g.sender_names_->GetSenderNames(&shared_object_names_);
-    return static_cast<int>(shared_object_names_.size());
+
+    if (g.renderer_ == klakspout::Globals::Renderer::DX11) {
+        if (g.spoutDX_->sendernames.GetSenderNames(&shared_object_names_)) {
+            return static_cast<int>(shared_object_names_.size());
+        }
+    }
+    else if (g.renderer_ == klakspout::Globals::Renderer::DX12) {
+        if (g.spoutDX12_->sendernames.GetSenderNames(&shared_object_names_)) {
+            return static_cast<int>(shared_object_names_.size());
+        }
+    }
+
+	return 0;
 }
 
 extern "C" const void UNITY_INTERFACE_EXPORT * GetSharedObjectName(int index)
 {
+    // static std::string temp;
+    // char strBuffer[256];
+    // if (g.spoutDX_->GetSender(index, strBuffer, 256))
+    // {
+    //     temp = strBuffer;
+    //     return temp.c_str();
+    // }
+    // else
+    // {
+    //     return nullptr;
+    // }
+
     auto count = 0;
     for (auto& name : shared_object_names_)
     {

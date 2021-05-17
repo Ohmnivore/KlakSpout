@@ -32,6 +32,9 @@ namespace Klak.Spout
         internal static extern System.IntPtr GetTexturePointer(System.IntPtr ptr);
 
         [DllImport("KlakSpout")]
+        internal static extern int SendTexture(System.IntPtr ptr, System.IntPtr tex);
+
+        [DllImport("KlakSpout")]
         internal static extern int GetTextureWidth(System.IntPtr ptr);
 
         [DllImport("KlakSpout")]
