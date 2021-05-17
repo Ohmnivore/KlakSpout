@@ -100,19 +100,19 @@ namespace klakspout
 
             auto& g = Globals::get();
 
-            // if (g.renderer_ == Globals::Renderer::DX11)
-            // {
-            //     ID3D11Texture2D* dx11Texture = static_cast<ID3D11Texture2D*>(texture);
-            //     return g.spoutDX_->SendTexture(dx11Texture);
-            // }
-            // else if (g.renderer_ == Globals::Renderer::DX12)
-            // {
-            //     ID3D12Resource* dx12Resource = static_cast<ID3D12Resource*>(texture);
-            //     if (!wrappedDX12Texture)
-            //         g.spoutDX12_->WrapDX12Resource(dx12Resource, &wrappedDX12Texture);
-            //     if (wrappedDX12Texture)
-            //         return g.spoutDX12_->SendDX11Resource(wrappedDX12Texture);
-            // }
+            if (g.renderer_ == Globals::Renderer::DX11)
+            {
+                ID3D11Texture2D* dx11Texture = static_cast<ID3D11Texture2D*>(texture);
+                return g.spoutDX_->SendTexture(dx11Texture);
+            }
+            else if (g.renderer_ == Globals::Renderer::DX12)
+            {
+                ID3D12Resource* dx12Resource = static_cast<ID3D12Resource*>(texture);
+                if (!wrappedDX12Texture)
+                    g.spoutDX12_->WrapDX12Resource(dx12Resource, &wrappedDX12Texture);
+                if (wrappedDX12Texture)
+                    return g.spoutDX12_->SendDX11Resource(wrappedDX12Texture);
+            }
 
             return false;
         }
